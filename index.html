@@ -6,9 +6,9 @@
   <title>Eat — สุ่มร้านอร่อย</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="preconnect" href="https://script.google.com">
-  <link rel="preconnect" href="https://script.googleusercontent.com">
+  <link rel="preconnect" href="https://panytmjeaomvxdxlcdva.supabase.co">
   <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
     :root {
       --bg-cream: #FAF3EA;
@@ -2000,14 +2000,17 @@
     </div>
   </div>
   <script>
+    // ==================== SUPABASE CONFIGURATION ====================
+    const SUPABASE_URL = "https://panytmjeaomvxdxlcdva.supabase.co";
+    const SUPABASE_KEY = "sb_publishable_Int-COAN2ml7iKQZibAx5w_86wpoonW";
+    const STORAGE_BUCKET = "eat-images";
+    const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
     const TOKEN_KEY = "eat_session_token";
     const GUEST_MODE_KEY = "eat_guest_mode";
     const DISMISS_ANNOUNCE_KEY = "eat_dismiss_announce_day";
     const THEME_KEY = "eat_theme_mode";
     const CONTACT_CACHE_KEY = "eat_admin_contact_cache_v1";
-
-    // แทนที่ด้วย URL ของ Web App ที่ Deploy จาก Google Apps Script (แผ่นงาน Contact)
-    const CONTACT_SHEET_WEBAPP_URL = "";
 
     const DEFAULT_ADMIN_CONTACTS = [
       { platform: "line", label: "LINE Official", url: "https://line.me/R/" },
@@ -2056,6 +2059,17 @@
 
     function getTodayBangkokKey() {
       return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Bangkok" });
+    }
+
+    function formatBangkokDateTime() {
+      return new Date().toLocaleString("th-TH", {
+        timeZone: "Asia/Bangkok",
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit"
+      });
     }
 
     const State = {
@@ -2201,52 +2215,17 @@
     }
 
     async function revalidateContactsBackground() {
-      const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-      const timer = setTimeout(() => {
-        if (controller) controller.abort();
-      }, 3000);
-
       try {
-        let contactsData = null;
-
-        if (CONTACT_SHEET_WEBAPP_URL) {
-          const sep = CONTACT_SHEET_WEBAPP_URL.indexOf("?") === -1 ? "?" : "&";
-          const resp = await fetch(
-            CONTACT_SHEET_WEBAPP_URL + sep + "route=contact&_t=" + Date.now(),
-            { method: "GET", cache: "no-store", signal: controller ? controller.signal : undefined }
-          );
-          if (!resp.ok) throw new Error("HTTP " + resp.status);
-          const json = await resp.json();
-          contactsData = json && (json.contacts || json.data || json);
-        } else if (typeof google !== "undefined" && google.script && google.script.run) {
-          contactsData = await new Promise((resolve, reject) => {
-            const gsTimer = setTimeout(() => reject(new Error("GAS contact timeout")), 3000);
-            google.script.run
-              .withSuccessHandler(res => {
-                clearTimeout(gsTimer);
-                const parsed = typeof res === "string" ? JSON.parse(res) : res;
-                resolve(parsed && (parsed.contacts || parsed.data || parsed));
-              })
-              .withFailureHandler(err => {
-                clearTimeout(gsTimer);
-                reject(err);
-              })
-              .getAdminContactsJson();
-          });
-        }
-
-        if (Array.isArray(contactsData) && contactsData.length > 0) {
-          const normalized = normalizeContacts(contactsData);
+        const { data, error } = await sb.from("admin_contacts").select("*");
+        if (!error && Array.isArray(data) && data.length > 0) {
+          const normalized = normalizeContacts(data);
           setPersistStore(CONTACT_CACHE_KEY, JSON.stringify({
             updatedAt: Date.now(),
             contacts: normalized
           }));
           applyContactsToPopover(normalized);
         }
-      } catch (e) {
-      } finally {
-        clearTimeout(timer);
-      }
+      } catch (e) {}
     }
 
     function setAdminPopoverOpen(open) {
@@ -2340,8 +2319,11 @@
       return String(str).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
     }
 
-    function thumbUrl(fileId) {
-      return fileId ? "https://drive.google.com/thumbnail?id=" + encodeURIComponent(fileId) + "&sz=w800" : "";
+    function thumbUrl(imgRef) {
+      if (!imgRef) return "";
+      const s = String(imgRef).trim();
+      if (/^https?:\/\//i.test(s) || /^data:/i.test(s)) return s;
+      return "https://drive.google.com/thumbnail?id=" + encodeURIComponent(s) + "&sz=w800";
     }
 
     function isoToDmy(iso) {
@@ -2349,12 +2331,24 @@
       return m ? (m[3] + "/" + m[2] + "/" + m[1]) : "";
     }
 
+    function dmyToIso(dmy) {
+      const s = String(dmy || "").trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+      const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (!m) return "";
+      let y = Number(m[3]);
+      if (y > 2400) y -= 543;
+      return String(y).padStart(4, "0") + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0");
+    }
+
     function isBannerLiveNow(b) {
       if (typeof b.is_currently_showing === "boolean") return b.is_currently_showing;
       if (!b.is_active) return false;
       const todayIso = getTodayBangkokKey();
-      if (b.start_date && todayIso < b.start_date) return false;
-      if (b.end_date && todayIso > b.end_date) return false;
+      const sIso = dmyToIso(b.start_date) || b.start_date;
+      const eIso = dmyToIso(b.end_date) || b.end_date;
+      if (sIso && todayIso < sIso) return false;
+      if (eIso && todayIso > eIso) return false;
       return true;
     }
 
@@ -2366,18 +2360,471 @@
       el._t = setTimeout(() => el.classList.add("hidden"), 3200);
     }
 
-    function callApiJson(fnName, ...args) {
-      return new Promise((resolve, reject) => {
-        google.script.run
-          .withSuccessHandler(jsonStr => {
-            try {
-              const res = typeof jsonStr === "string" ? JSON.parse(jsonStr) : jsonStr;
-              if (!res || res.ok === false) reject(new Error(res && res.error ? res.error : "เกิดข้อผิดพลาด"));
-              else resolve(res);
-            } catch (e) { reject(e); }
-          })
-          .withFailureHandler(err => reject(new Error(err && err.message ? err.message : "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้")))[fnName](...args);
+    // ==================== SUPABASE DATA & AUTH ADAPTER ====================
+    function genId(prefix) {
+      return prefix + "_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+    }
+
+    async function sha256Hex(str) {
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(str)));
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    async function requireUserByToken(token) {
+      if (!token) throw new Error("กรุณาเข้าสู่ระบบก่อนใช้งาน");
+      const { data, error } = await sb.from("app_users").select("*").eq("session_token", token).maybeSingle();
+      if (error || !data) throw new Error("เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่");
+      return data;
+    }
+
+    async function requireAdminByToken(token) {
+      const user = await requireUserByToken(token);
+      if (user.role !== "admin" && user.role !== "owner") {
+        throw new Error("ไม่มีสิทธิ์เข้าถึงส่วนจัดการระบบ");
+      }
+      return user;
+    }
+
+    function dataUrlToBlob(dataUrl) {
+      const parts = dataUrl.split(",");
+      const mime = (parts[0].match(/:(.*?);/) || [])[1] || "image/jpeg";
+      const bin = atob(parts[1]);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      return new Blob([arr], { type: mime });
+    }
+
+    async function uploadDataUrlToStorage(dataUrl, folder) {
+      const blob = dataUrlToBlob(dataUrl);
+      const path = (folder || "uploads") + "/" + Date.now() + "_" + Math.random().toString(36).slice(2, 8) + ".jpg";
+      const { error } = await sb.storage.from(STORAGE_BUCKET).upload(path, blob, {
+        contentType: "image/jpeg",
+        upsert: false
       });
+      if (error) throw new Error("อัปโหลดรูปไม่สำเร็จ: " + error.message);
+      const { data } = sb.storage.from(STORAGE_BUCKET).getPublicUrl(path);
+      return data.publicUrl;
+    }
+
+    async function deleteStorageFileByUrl(imageUrl) {
+      if (!imageUrl || imageUrl.indexOf("/storage/v1/object/public/" + STORAGE_BUCKET + "/") === -1) return;
+      const marker = "/storage/v1/object/public/" + STORAGE_BUCKET + "/";
+      const idx = imageUrl.indexOf(marker);
+      const filePath = decodeURIComponent(imageUrl.slice(idx + marker.length));
+      if (filePath) {
+        await sb.storage.from(STORAGE_BUCKET).remove([filePath]);
+      }
+    }
+
+    async function callApiJson(fnName, ...args) {
+      if (fnName === "getStep4BootJson") {
+        const [token, isInitialBoot] = args;
+        const [placesRes, photosRes, commentsRes, bannersRes, usersRes, statsRes] = await Promise.all([
+          sb.from("places").select("*").order("created_at", { ascending: false }),
+          sb.from("place_photos").select("*").order("sort_order", { ascending: true }),
+          sb.from("place_comments").select("place_id, rating"),
+          sb.from("banners").select("*").order("sort_order", { ascending: true }),
+          sb.from("app_users").select("member_id, nickname"),
+          sb.from("app_stats").select("*").eq("id", 1).maybeSingle()
+        ]);
+
+        if (placesRes.error) throw new Error(placesRes.error.message);
+
+        const photosByPlace = {};
+        (photosRes.data || []).forEach(ph => {
+          if (!photosByPlace[ph.place_id]) photosByPlace[ph.place_id] = [];
+          photosByPlace[ph.place_id].push(ph);
+        });
+
+        const ratingsByPlace = {};
+        (commentsRes.data || []).forEach(c => {
+          if (!ratingsByPlace[c.place_id]) ratingsByPlace[c.place_id] = { sum: 0, count: 0 };
+          ratingsByPlace[c.place_id].sum += Number(c.rating || 5);
+          ratingsByPlace[c.place_id].count += 1;
+        });
+
+        const places = (placesRes.data || []).map(p => {
+          const phList = photosByPlace[p.id] || [];
+          const rInfo = ratingsByPlace[p.id] || { sum: 0, count: 0 };
+          const avg = rInfo.count > 0 ? Math.round((rInfo.sum / rInfo.count) * 10) / 10 : 0;
+          return Object.assign({}, p, {
+            lat: p.lat !== null && p.lat !== "" ? Number(p.lat) : null,
+            lng: p.lng !== null && p.lng !== "" ? Number(p.lng) : null,
+            price_level: Number(p.price_level || 1),
+            cover_id: phList.length > 0 ? phList[0].image_url : "",
+            photos: phList.map(x => x.image_url),
+            photo_items: phList.map(x => ({ photo_id: x.photo_id, fid: x.image_url })),
+            avg_rating: avg,
+            comment_count: rInfo.count
+          });
+        });
+
+        const banners = (bannersRes.data || []).map(b => Object.assign({}, b, {
+          drive_file_id: b.image_url || ""
+        }));
+
+        let visitCount = Number((statsRes.data && statsRes.data.visit_count) || 0);
+        if (isInitialBoot) {
+          visitCount += 1;
+          await sb.from("app_stats").upsert({ id: 1, visit_count: visitCount });
+        }
+
+        const allUsers = usersRes.data || [];
+        const stats = {
+          visit_count: visitCount,
+          member_count: allUsers.length,
+          member_names: allUsers.map(u => u.nickname).filter(Boolean)
+        };
+
+        let user = null;
+        let favorites = [];
+        let visited = [];
+        if (token) {
+          const { data: uRow } = await sb.from("app_users").select("*").eq("session_token", token).maybeSingle();
+          if (uRow) {
+            user = {
+              member_id: uRow.member_id,
+              username: uRow.username,
+              nickname: uRow.nickname,
+              role: uRow.role,
+              joined_at: uRow.joined_at
+            };
+            const [favRes, visRes] = await Promise.all([
+              sb.from("user_favorites").select("place_id").eq("member_id", uRow.member_id),
+              sb.from("user_visited").select("place_id").eq("member_id", uRow.member_id)
+            ]);
+            favorites = (favRes.data || []).map(x => x.place_id);
+            visited = (visRes.data || []).map(x => x.place_id);
+          }
+        }
+
+        return { ok: true, places, banners, stats, user, favorites, visited };
+      }
+
+      if (fnName === "registerUserJson") {
+        const [usernameRaw, password, confirmPassword] = args;
+        const username = String(usernameRaw || "").trim();
+        if (username.length < 2 || username.length > 20) throw new Error("ชื่อผู้ใช้ต้องมีความยาว 2-20 ตัวอักษร");
+        if (String(password || "").length < 6) throw new Error("รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร");
+        if (password !== confirmPassword) throw new Error("ยืนยันรหัสผ่านไม่ตรงกัน");
+
+        const { data: existing } = await sb.from("app_users").select("member_id").ilike("username", username).maybeSingle();
+        if (existing) throw new Error("ชื่อผู้ใช้นี้มีคนใช้แล้ว กรุณาตั้งชื่ออื่น");
+
+        const { count } = await sb.from("app_users").select("*", { count: "exact", head: true });
+        const role = (count === 0) ? "owner" : "member";
+        const memberId = genId("usr");
+        const token = genId("tok") + Math.random().toString(36).slice(2, 10);
+        const pwHash = await sha256Hex(password);
+        const joinedAt = new Date().toLocaleDateString("th-TH", { timeZone: "Asia/Bangkok", day: "2-digit", month: "short", year: "numeric" });
+
+        const { error } = await sb.from("app_users").insert({
+          member_id: memberId,
+          username: username,
+          nickname: username,
+          password_hash: pwHash,
+          role: role,
+          session_token: token,
+          joined_at: joinedAt,
+          last_login: new Date().toISOString()
+        });
+        if (error) throw new Error("สมัครสมาชิกไม่สำเร็จ: " + error.message);
+
+        return {
+          ok: true,
+          token,
+          user: { member_id: memberId, username, nickname: username, role, joined_at: joinedAt }
+        };
+      }
+
+      if (fnName === "loginUserJson") {
+        const [usernameRaw, password] = args;
+        const username = String(usernameRaw || "").trim();
+        const { data: uRow, error } = await sb.from("app_users").select("*").ilike("username", username).maybeSingle();
+        if (error || !uRow) throw new Error("ไม่พบชื่อผู้ใช้นี้ในระบบ");
+
+        const pwHash = await sha256Hex(password);
+        if (uRow.password_hash !== pwHash) throw new Error("รหัสผ่านไม่ถูกต้อง");
+
+        const token = uRow.session_token || (genId("tok") + Math.random().toString(36).slice(2, 10));
+        await sb.from("app_users").update({
+          session_token: token,
+          last_login: new Date().toISOString()
+        }).eq("member_id", uRow.member_id);
+
+        const [favRes, visRes] = await Promise.all([
+          sb.from("user_favorites").select("place_id").eq("member_id", uRow.member_id),
+          sb.from("user_visited").select("place_id").eq("member_id", uRow.member_id)
+        ]);
+
+        return {
+          ok: true,
+          token,
+          user: {
+            member_id: uRow.member_id,
+            username: uRow.username,
+            nickname: uRow.nickname,
+            role: uRow.role,
+            joined_at: uRow.joined_at
+          },
+          favorites: (favRes.data || []).map(x => x.place_id),
+          visited: (visRes.data || []).map(x => x.place_id)
+        };
+      }
+
+      if (fnName === "changePasswordJson") {
+        const [token, curPass, newPass, confPass] = args;
+        const user = await requireUserByToken(token);
+        const curHash = await sha256Hex(curPass);
+        if (user.password_hash !== curHash) throw new Error("รหัสผ่านปัจจุบันไม่ถูกต้อง");
+        if (String(newPass || "").length < 6) throw new Error("รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร");
+        if (newPass !== confPass) throw new Error("ยืนยันรหัสผ่านใหม่ไม่ตรงกัน");
+
+        const newHash = await sha256Hex(newPass);
+        const newToken = genId("tok") + Math.random().toString(36).slice(2, 10);
+        const { error } = await sb.from("app_users").update({
+          password_hash: newHash,
+          session_token: newToken
+        }).eq("member_id", user.member_id);
+        if (error) throw new Error(error.message);
+        return { ok: true, token: newToken };
+      }
+
+      if (fnName === "updateNicknameJson") {
+        const [token, newNickRaw] = args;
+        const user = await requireUserByToken(token);
+        const nick = String(newNickRaw || "").trim();
+        if (nick.length < 2 || nick.length > 20) throw new Error("ชื่อผู้ใช้ต้องมีความยาว 2-20 ตัวอักษร");
+
+        const { data: dup } = await sb.from("app_users").select("member_id").ilike("username", nick).neq("member_id", user.member_id).maybeSingle();
+        if (dup) throw new Error("ชื่อนี้มีคนใช้แล้ว กรุณาเลือกชื่ออื่น");
+
+        const { error } = await sb.from("app_users").update({
+          username: nick,
+          nickname: nick
+        }).eq("member_id", user.member_id);
+        if (error) throw new Error(error.message);
+        return { ok: true, nickname: nick };
+      }
+
+      if (fnName === "toggleFavoriteJson") {
+        const [token, placeId] = args;
+        const user = await requireUserByToken(token);
+        const { data: existing } = await sb.from("user_favorites").select("*").eq("member_id", user.member_id).eq("place_id", placeId).maybeSingle();
+        if (existing) {
+          await sb.from("user_favorites").delete().eq("member_id", user.member_id).eq("place_id", placeId);
+          return { ok: true, isFavorite: false };
+        } else {
+          await sb.from("user_favorites").insert({ member_id: user.member_id, place_id: placeId });
+          return { ok: true, isFavorite: true };
+        }
+      }
+
+      if (fnName === "toggleVisitedJson") {
+        const [token, placeId] = args;
+        const user = await requireUserByToken(token);
+        const { data: existing } = await sb.from("user_visited").select("*").eq("member_id", user.member_id).eq("place_id", placeId).maybeSingle();
+        if (existing) {
+          await sb.from("user_visited").delete().eq("member_id", user.member_id).eq("place_id", placeId);
+          return { ok: true, isVisited: false };
+        } else {
+          await sb.from("user_visited").insert({ member_id: user.member_id, place_id: placeId });
+          return { ok: true, isVisited: true };
+        }
+      }
+
+      if (fnName === "getPlaceCommentsJson") {
+        const [placeId] = args;
+        const { data, error } = await sb.from("place_comments").select("*").eq("place_id", placeId);
+        if (error) throw new Error(error.message);
+        return { ok: true, comments: (data || []).reverse() };
+      }
+
+      if (fnName === "saveCommentJson") {
+        const [token, placeId, rating, text] = args;
+        const user = await requireUserByToken(token);
+        const cleanText = String(text || "").trim().slice(0, 300);
+        const numRating = Math.max(1, Math.min(5, Number(rating) || 5));
+        const updatedAt = formatBangkokDateTime();
+
+        const { data: existing } = await sb.from("place_comments").select("comment_id").eq("place_id", placeId).eq("member_id", user.member_id).maybeSingle();
+        if (existing) {
+          const { error } = await sb.from("place_comments").update({
+            nickname: user.nickname,
+            rating: numRating,
+            text: cleanText,
+            updated_at: updatedAt
+          }).eq("comment_id", existing.comment_id);
+          if (error) throw new Error(error.message);
+        } else {
+          const { error } = await sb.from("place_comments").insert({
+            comment_id: genId("cmt"),
+            place_id: placeId,
+            member_id: user.member_id,
+            nickname: user.nickname,
+            rating: numRating,
+            text: cleanText,
+            updated_at: updatedAt
+          });
+          if (error) throw new Error(error.message);
+        }
+        return { ok: true };
+      }
+
+      if (fnName === "deleteCommentJson") {
+        const [token, commentId] = args;
+        const user = await requireUserByToken(token);
+        const { data: cmt } = await sb.from("place_comments").select("*").eq("comment_id", commentId).maybeSingle();
+        if (!cmt) throw new Error("ไม่พบความเห็นนี้");
+        const isAdmin = user.role === "admin" || user.role === "owner";
+        if (cmt.member_id !== user.member_id && !isAdmin) throw new Error("ไม่มีสิทธิ์ลบความเห็นนี้");
+
+        await sb.from("place_comments").delete().eq("comment_id", commentId);
+        return { ok: true };
+      }
+
+      if (fnName === "adminSavePlaceJson") {
+        const [token, payload, b64List] = args;
+        await requireAdminByToken(token);
+        const placeId = payload.id || genId("plc");
+        const latVal = String(payload.lat || "").trim();
+        const lngVal = String(payload.lng || "").trim();
+
+        const row = {
+          id: placeId,
+          name: String(payload.name || "").trim(),
+          type: String(payload.type || "ร้านอาหาร").trim(),
+          cuisine: String(payload.cuisine || "").trim(),
+          price_level: Number(payload.price_level || 1),
+          status: String(payload.status || "wishlist").trim(),
+          area: String(payload.area || "").trim(),
+          address: String(payload.address || "").trim(),
+          lat: latVal !== "" && !isNaN(Number(latVal)) ? Number(latVal) : null,
+          lng: lngVal !== "" && !isNaN(Number(lngVal)) ? Number(lngVal) : null,
+          open_time: String(payload.open_time || "").trim(),
+          close_time: String(payload.close_time || "").trim(),
+          closed_days: String(payload.closed_days || "").trim(),
+          phone: String(payload.phone || "").trim(),
+          meal_time: String(payload.meal_time || "").trim(),
+          menu_tip: String(payload.menu_tip || "").trim(),
+          owner_note: String(payload.owner_note || "").trim(),
+          is_hidden: Boolean(payload.is_hidden)
+        };
+
+        const { error } = await sb.from("places").upsert(row);
+        if (error) throw new Error("บันทึกร้านไม่สำเร็จ: " + error.message);
+
+        if (Array.isArray(b64List) && b64List.length > 0) {
+          const { data: existingPhotos } = await sb.from("place_photos").select("sort_order").eq("place_id", placeId);
+          let nextOrder = (existingPhotos || []).reduce((max, x) => Math.max(max, Number(x.sort_order || 0)), -1) + 1;
+
+          for (const b64 of b64List) {
+            const publicUrl = await uploadDataUrlToStorage(b64, "places/" + placeId);
+            await sb.from("place_photos").insert({
+              photo_id: genId("pho"),
+              place_id: placeId,
+              image_url: publicUrl,
+              sort_order: nextOrder++
+            });
+          }
+        }
+        return { ok: true, id: placeId };
+      }
+
+      if (fnName === "adminDeletePhotoJson") {
+        const [token, photoId] = args;
+        await requireAdminByToken(token);
+        const { data: ph } = await sb.from("place_photos").select("*").eq("photo_id", photoId).maybeSingle();
+        if (ph) {
+          await deleteStorageFileByUrl(ph.image_url);
+          await sb.from("place_photos").delete().eq("photo_id", photoId);
+        }
+        return { ok: true };
+      }
+
+      if (fnName === "adminDeletePlaceJson") {
+        const [token, placeId] = args;
+        await requireAdminByToken(token);
+        const { data: photos } = await sb.from("place_photos").select("image_url").eq("place_id", placeId);
+        for (const ph of (photos || [])) {
+          await deleteStorageFileByUrl(ph.image_url);
+        }
+        await sb.from("places").delete().eq("id", placeId);
+        return { ok: true };
+      }
+
+      if (fnName === "adminSaveBannerJson") {
+        const [token, payload, b64] = args;
+        await requireAdminByToken(token);
+        const bannerId = payload.banner_id || genId("bnr");
+        let imageUrl = "";
+
+        if (payload.banner_id) {
+          const { data: oldBnr } = await sb.from("banners").select("image_url, sort_order").eq("banner_id", bannerId).maybeSingle();
+          imageUrl = (oldBnr && oldBnr.image_url) || "";
+          if (b64) {
+            await deleteStorageFileByUrl(imageUrl);
+            imageUrl = await uploadDataUrlToStorage(b64, "banners");
+          }
+          const { error } = await sb.from("banners").update({
+            title: String(payload.title || "").trim(),
+            image_url: imageUrl,
+            link_url: String(payload.link_url || "").trim(),
+            start_date: dmyToIso(payload.start_date),
+            end_date: dmyToIso(payload.end_date),
+            is_active: Boolean(payload.is_active)
+          }).eq("banner_id", bannerId);
+          if (error) throw new Error(error.message);
+        } else {
+          if (!b64) throw new Error("กรุณาอัปโหลดภาพโปสเตอร์");
+          imageUrl = await uploadDataUrlToStorage(b64, "banners");
+          const { data: allB } = await sb.from("banners").select("sort_order");
+          const nextOrder = (allB || []).reduce((max, x) => Math.max(max, Number(x.sort_order || 0)), -1) + 1;
+          const { error } = await sb.from("banners").insert({
+            banner_id: bannerId,
+            title: String(payload.title || "").trim(),
+            image_url: imageUrl,
+            link_url: String(payload.link_url || "").trim(),
+            start_date: dmyToIso(payload.start_date),
+            end_date: dmyToIso(payload.end_date),
+            is_active: Boolean(payload.is_active),
+            sort_order: nextOrder
+          });
+          if (error) throw new Error(error.message);
+        }
+        return { ok: true };
+      }
+
+      if (fnName === "adminToggleBannerJson") {
+        const [token, bannerId] = args;
+        await requireAdminByToken(token);
+        const { data: bnr } = await sb.from("banners").select("is_active").eq("banner_id", bannerId).maybeSingle();
+        if (!bnr) throw new Error("ไม่พบบอร์ดประชาสัมพันธ์");
+        await sb.from("banners").update({ is_active: !bnr.is_active }).eq("banner_id", bannerId);
+        return { ok: true };
+      }
+
+      if (fnName === "adminDeleteBannerJson") {
+        const [token, bannerId] = args;
+        await requireAdminByToken(token);
+        const { data: bnr } = await sb.from("banners").select("image_url").eq("banner_id", bannerId).maybeSingle();
+        if (bnr) {
+          await deleteStorageFileByUrl(bnr.image_url);
+          await sb.from("banners").delete().eq("banner_id", bannerId);
+        }
+        return { ok: true };
+      }
+
+      if (fnName === "adminReorderBannersJson") {
+        const [token, orderedIds] = args;
+        await requireAdminByToken(token);
+        for (let i = 0; i < orderedIds.length; i++) {
+          await sb.from("banners").update({ sort_order: i }).eq("banner_id", orderedIds[i]);
+        }
+        return { ok: true };
+      }
+
+      throw new Error("ไม่พบคำสั่ง: " + fnName);
     }
 
     function compressImageFile(file, maxW) {
@@ -3306,736 +3753,4 @@
 
     function openAdminPlaceForm(placeId) {
       const p = placeId ? State.allPlacesRaw.find(x => x.id === placeId) : null;
-      document.getElementById("apf-title").textContent = p ? "แก้ไขข้อมูลร้าน" : "เพิ่มร้านใหม่";
-      document.getElementById("apf-id").value = p ? p.id : "";
-      document.getElementById("apf-name").value = p ? p.name : "";
-      document.getElementById("apf-type").value = p ? p.type : "ร้านอาหาร";
-      document.getElementById("apf-cuisine").value = p ? p.cuisine : "";
-      document.getElementById("apf-price").value = p ? String(p.price_level) : "1";
-      document.getElementById("apf-status").value = p ? p.status : "wishlist";
-      document.getElementById("apf-area").value = p ? p.area : "";
-      document.getElementById("apf-address").value = p ? p.address : "";
-      document.getElementById("apf-lat").value = (p && p.lat !== null) ? String(p.lat) : "";
-      document.getElementById("apf-lng").value = (p && p.lng !== null) ? String(p.lng) : "";
-      document.getElementById("apf-open").value = p ? p.open_time : "";
-      document.getElementById("apf-close").value = p ? p.close_time : "";
-      document.getElementById("apf-closed-days").value = p ? p.closed_days : "";
-      document.getElementById("apf-phone").value = p ? p.phone : "";
-      document.getElementById("apf-meal").value = p ? p.meal_time : "";
-      document.getElementById("apf-menu").value = p ? p.menu_tip : "";
-      document.getElementById("apf-note").value = p ? p.owner_note : "";
-      document.getElementById("apf-hidden").checked = p ? Boolean(p.is_hidden) : false;
-      document.getElementById("apf-files").value = "";
-
-      const exWrap = document.getElementById("apf-existing-photos-wrap");
-      const exGrid = document.getElementById("apf-existing-photos");
-      if (p && p.photo_items && p.photo_items.length > 0) {
-        exWrap.classList.remove("hidden");
-        exGrid.innerHTML = p.photo_items.map(ph =>
-          '<div class="admin-photo-item">' +
-            '<img src="' + thumbUrl(ph.fid) + '" alt="">' +
-            '<button type="button" class="admin-photo-del" data-del-photo="' + esc(ph.photo_id) + '">✕</button>' +
-          '</div>'
-        ).join("");
-      } else {
-        exWrap.classList.add("hidden");
-        exGrid.innerHTML = "";
-      }
-
-      navigateTo("admin-place-form");
-    }
-
-    async function deleteAdminPhoto(photoId) {
-      try {
-        await callApiJson("adminDeletePhotoJson", State.token, photoId);
-        showToast("ลบรูปภาพแล้ว");
-        await reloadAllBootData();
-        const curId = document.getElementById("apf-id").value;
-        if (curId) openAdminPlaceForm(curId);
-      } catch (e) { showToast(e.message); }
-    }
-
-    async function deleteAdminPlace(placeId) {
-      if (!confirm("ยืนยันการลบร้านนี้ออกจากฐานข้อมูล?")) return;
-      try {
-        await callApiJson("adminDeletePlaceJson", State.token, placeId);
-        showToast("ลบร้านเรียบร้อยแล้ว");
-        await reloadAllBootData();
-        renderAdminPlacesList();
-      } catch (e) { showToast(e.message); }
-    }
-
-    // ==================== ADMIN BANNERS ====================
-    function renderAdminBannersList() {
-      const box = document.getElementById("admin-banners-list");
-      if (State.banners.length === 0) {
-        box.innerHTML = '<div class="soft-card text-center text-sm text-sub">ยังไม่มีบอร์ดประชาสัมพันธ์</div>';
-        return;
-      }
-
-      box.innerHTML = State.banners.map(b => {
-        const live = isBannerLiveNow(b);
-        const pillClass = live ? "status-pill-live" : (b.is_active ? "status-pill-sched" : "status-pill-off");
-        const pillText = live ? "แสดงอยู่" : (b.is_active ? "ตั้งเวลาไว้" : "ปิดอยู่");
-        const rangeText = (b.start_date || b.end_date)
-          ? ((b.start_date ? isoToDmy(b.start_date) : "ไม่จำกัด") + " – " + (b.end_date ? isoToDmy(b.end_date) : "ไม่จำกัด"))
-          : "แสดงตลอด (ไม่กำหนดวัน)";
-
-        return '<div class="banner-manage-card" data-bid="' + esc(b.banner_id) + '">' +
-          '<span class="drag-handle" title="ลากเพื่อเรียงลำดับ">⋮⋮</span>' +
-          '<div class="banner-thumb">' + (b.drive_file_id ? '<img src="' + thumbUrl(b.drive_file_id) + '" alt="">' : '🖼️') + '</div>' +
-          '<div class="flex-1" style="min-width:0;">' +
-            '<div class="font-semibold text-sm">' + esc(b.title) + '</div>' +
-            '<div class="text-xs text-sub mt-4">' + esc(rangeText) + '</div>' +
-            '<div class="mt-4"><span class="badge ' + pillClass + '">' + pillText + '</span></div>' +
-          '</div>' +
-          '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">' +
-            '<label class="switch-toggle">' +
-              '<input type="checkbox" class="js-toggle-banner" data-bid="' + esc(b.banner_id) + '" ' + (b.is_active ? 'checked' : '') + '>' +
-              '<span class="switch-slider"></span>' +
-            '</label>' +
-            '<div class="flex-row gap-8">' +
-              '<button type="button" class="link-btn text-xs" style="min-height:30px;" data-edit-banner="' + esc(b.banner_id) + '">✏️</button>' +
-              '<button type="button" class="link-btn text-xs" style="min-height:30px;" data-del-banner="' + esc(b.banner_id) + '">🗑️</button>' +
-            '</div>' +
-          '</div>' +
-        '</div>';
-      }).join("");
-
-      initBannerDragSort();
-    }
-
-    function initBannerDragSort() {
-      const container = document.getElementById("admin-banners-list");
-      let draggingEl = null;
-
-      container.querySelectorAll(".banner-manage-card").forEach(card => {
-        const handle = card.querySelector(".drag-handle");
-        card.setAttribute("draggable", "true");
-
-        card.addEventListener("dragstart", e => {
-          if (e.target.closest("button, label, input")) { e.preventDefault(); return; }
-          draggingEl = card;
-          card.style.opacity = "0.5";
-        });
-
-        card.addEventListener("dragend", async () => {
-          if (!draggingEl) return;
-          draggingEl.style.opacity = "";
-          draggingEl = null;
-          const orderedIds = Array.from(container.querySelectorAll(".banner-manage-card")).map(el => el.dataset.bid);
-          try {
-            await callApiJson("adminReorderBannersJson", State.token, orderedIds);
-            await reloadAllBootData();
-            renderAdminBannersList();
-            showToast("บันทึกลำดับบอร์ดแล้ว");
-          } catch (err) { showToast(err.message); }
-        });
-
-        card.addEventListener("dragover", e => {
-          e.preventDefault();
-          if (!draggingEl || draggingEl === card) return;
-          const rect = card.getBoundingClientRect();
-          const after = (e.clientY - rect.top) > rect.height / 2;
-          container.insertBefore(draggingEl, after ? card.nextSibling : card);
-        });
-
-        handle.addEventListener("touchstart", () => { draggingEl = card; card.style.opacity = "0.6"; }, { passive: true });
-        handle.addEventListener("touchmove", e => {
-          if (!draggingEl) return;
-          e.preventDefault();
-          const touch = e.touches[0];
-          const target = document.elementFromPoint(touch.clientX, touch.clientY)?.closest(".banner-manage-card");
-          if (target && target !== draggingEl && container.contains(target)) {
-            const rect = target.getBoundingClientRect();
-            const after = (touch.clientY - rect.top) > rect.height / 2;
-            container.insertBefore(draggingEl, after ? target.nextSibling : target);
-          }
-        }, { passive: false });
-        handle.addEventListener("touchend", async () => {
-          if (!draggingEl) return;
-          draggingEl.style.opacity = "";
-          draggingEl = null;
-          const orderedIds = Array.from(container.querySelectorAll(".banner-manage-card")).map(el => el.dataset.bid);
-          try {
-            await callApiJson("adminReorderBannersJson", State.token, orderedIds);
-            await reloadAllBootData();
-            renderAdminBannersList();
-            showToast("บันทึกลำดับบอร์ดแล้ว");
-          } catch (err) { showToast(err.message); }
-        });
-      });
-    }
-
-    function resetBannerForm() {
-      document.getElementById("bnr-edit-id").value = "";
-      document.getElementById("bnr-form-heading").textContent = "เพิ่มบอร์ดใหม่";
-      document.getElementById("bnr-edit-badge").classList.add("hidden");
-      document.getElementById("form-admin-banner").reset();
-      document.getElementById("bnr-active").checked = true;
-      document.getElementById("bnr-preview-wrap").classList.add("hidden");
-      document.getElementById("bnr-preview-img").src = "";
-    }
-
-    function editAdminBanner(bid) {
-      const b = State.banners.find(x => x.banner_id === bid);
-      if (!b) return;
-      document.getElementById("bnr-edit-id").value = b.banner_id;
-      document.getElementById("bnr-form-heading").textContent = "แก้ไขบอร์ด";
-      document.getElementById("bnr-edit-badge").classList.remove("hidden");
-      document.getElementById("bnr-title").value = b.title;
-      document.getElementById("bnr-link").value = b.link_url;
-      document.getElementById("bnr-start").value = isoToDmy(b.start_date);
-      document.getElementById("bnr-end").value = isoToDmy(b.end_date);
-      document.getElementById("bnr-active").checked = Boolean(b.is_active);
-      document.getElementById("bnr-file").value = "";
-
-      if (b.drive_file_id) {
-        document.getElementById("bnr-preview-img").src = thumbUrl(b.drive_file_id);
-        document.getElementById("bnr-preview-wrap").classList.remove("hidden");
-      }
-      document.getElementById("form-admin-banner").scrollIntoView({ behavior: "smooth" });
-    }
-
-    async function toggleAdminBanner(bid) {
-      try {
-        await callApiJson("adminToggleBannerJson", State.token, bid);
-        await reloadAllBootData();
-        renderAdminBannersList();
-      } catch (e) { showToast(e.message); }
-    }
-
-    async function deleteAdminBanner(bid) {
-      if (!confirm("ยืนยันการลบบอร์ดประชาสัมพันธ์นี้?")) return;
-      try {
-        await callApiJson("adminDeleteBannerJson", State.token, bid);
-        showToast("ลบบอร์ดแล้ว");
-        await reloadAllBootData();
-        renderAdminBannersList();
-      } catch (e) { showToast(e.message); }
-    }
-
-    function copyText(txt, customMsg) {
-      if (!txt) return;
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(txt).then(() => showToast(customMsg || ("คัดลอก " + txt + " แล้ว")));
-      } else {
-        const ta = document.createElement("textarea");
-        ta.value = txt;
-        document.body.appendChild(ta);
-        ta.select();
-        try { document.execCommand("copy"); } catch (e) {}
-        document.body.removeChild(ta);
-        showToast(customMsg || ("คัดลอก " + txt + " แล้ว"));
-      }
-    }
-
-    // ==================== EVENT DELEGATION & DIRECT LISTENERS ====================
-    document.addEventListener("click", e => {
-      const target = e.target;
-      if (!(target instanceof Element)) return;
-
-      // ปิด Popover เมื่อแตะพื้นที่ภายนอก Popover และปุ่มช่องทางติดต่อแอดมิน
-      if (
-        State.adminPopoverOpen &&
-        !target.closest("#admin-contact-popover") &&
-        !target.closest("#btn-prof-contact-admin")
-      ) {
-        setAdminPopoverOpen(false);
-      }
-
-      // สลับแสดง/ซ่อนรหัสผ่าน
-      const eyeBtn = target.closest(".eye-toggle-btn");
-      if (eyeBtn) {
-        const inputEl = document.getElementById(eyeBtn.dataset.eyeTarget);
-        if (inputEl) {
-          const show = inputEl.type === "password";
-          inputEl.type = show ? "text" : "password";
-          eyeBtn.style.color = show ? "var(--coral)" : "var(--text-sub)";
-        }
-        return;
-      }
-
-      // ปุ่มเมนูล่าง 5 ช่อง
-      const navBtn = target.closest("#bottom-nav .nav-item");
-      if (navBtn) {
-        navigateTo(navBtn.dataset.nav);
-        return;
-      }
-
-      // ปุ่มนำทางในรายการใกล้ฉันไม่ให้เปิดหน้า detail ซ้อน
-      if (target.closest("[data-stop-nav]")) return;
-
-      const openDetailEl = target.closest("[data-open-detail]");
-      if (openDetailEl) {
-        openDetail(openDetailEl.dataset.openDetail);
-        return;
-      }
-
-      const favBtn = target.closest("[data-fav-id]");
-      if (favBtn) {
-        e.stopPropagation();
-        toggleFav(favBtn.dataset.favId);
-        return;
-      }
-
-      const navTargetEl = target.closest("[data-nav-target]");
-      if (navTargetEl) {
-        navigateTo(navTargetEl.dataset.navTarget);
-        return;
-      }
-
-      const promptLoginEl = target.closest("[data-prompt-login]");
-      if (promptLoginEl) {
-        promptLoginForFeature(promptLoginEl.dataset.promptLogin);
-        return;
-      }
-
-      const delCmtEl = target.closest("[data-del-cmt]");
-      if (delCmtEl) {
-        removeComment(delCmtEl.dataset.delCmt);
-        return;
-      }
-
-      if (target.closest("[data-request-geo]")) {
-        requestGeo();
-        return;
-      }
-
-      const editPlaceEl = target.closest("[data-edit-place]");
-      if (editPlaceEl) {
-        openAdminPlaceForm(editPlaceEl.dataset.editPlace);
-        return;
-      }
-
-      const delPlaceEl = target.closest("[data-del-place]");
-      if (delPlaceEl) {
-        deleteAdminPlace(delPlaceEl.dataset.delPlace);
-        return;
-      }
-
-      const delPhotoEl = target.closest("[data-del-photo]");
-      if (delPhotoEl) {
-        deleteAdminPhoto(delPhotoEl.dataset.delPhoto);
-        return;
-      }
-
-      const editBnrEl = target.closest("[data-edit-banner]");
-      if (editBnrEl) {
-        editAdminBanner(editBnrEl.dataset.editBanner);
-        return;
-      }
-
-      const delBnrEl = target.closest("[data-del-banner]");
-      if (delBnrEl) {
-        deleteAdminBanner(delBnrEl.dataset.delBanner);
-        return;
-      }
-
-      const dotEl = target.closest(".announce-dot[data-announce-idx]");
-      if (dotEl) {
-        State.announceIndex = Number(dotEl.dataset.announceIdx);
-        renderAnnounceModalSlide();
-      }
-    });
-
-    document.addEventListener("change", e => {
-      const target = e.target;
-      if (!(target instanceof Element)) return;
-      const toggleBnrEl = target.closest(".js-toggle-banner[data-bid]");
-      if (toggleBnrEl) {
-        toggleAdminBanner(toggleBnrEl.dataset.bid);
-      }
-    });
-
-    document.getElementById("btn-toggle-theme").onclick = toggleThemeMode;
-    const favThemeEl = document.getElementById("btn-fav-toggle-theme");
-    if (favThemeEl) favThemeEl.onclick = toggleThemeMode;
-    const favLogoutEl = document.getElementById("btn-fav-logout");
-    if (favLogoutEl) favLogoutEl.onclick = performLogout;
-
-    document.getElementById("btn-close-announce").onclick = closeAnnounceModal;
-    document.getElementById("btn-dismiss-today").onclick = dismissAnnounceToday;
-    document.getElementById("announce-modal").onclick = e => {
-      if (e.target.id === "announce-modal") closeAnnounceModal();
-    };
-
-    document.querySelectorAll("#home-meal-chips .chip").forEach(btn => {
-      btn.onclick = () => {
-        State.homeMeal = State.homeMeal === btn.dataset.meal ? "" : btn.dataset.meal;
-        document.querySelectorAll("#home-meal-chips .chip").forEach(c => c.classList.toggle("active", c.dataset.meal === State.homeMeal));
-        resetHomeResult();
-      };
-    });
-
-    document.querySelectorAll("#home-extra-chips .chip[data-price]").forEach(btn => {
-      btn.onclick = () => {
-        const v = Number(btn.dataset.price);
-        State.homePrice = State.homePrice === v ? 0 : v;
-        document.querySelectorAll("#home-extra-chips .chip[data-price]").forEach(c => c.classList.toggle("active", Number(c.dataset.price) === State.homePrice));
-        resetHomeResult();
-      };
-    });
-
-    document.getElementById("btn-home-near").onclick = () => {
-      if (!State.homeNearOnly) {
-        if (!State.userGeo) {
-          requestGeo(() => {
-            State.homeNearOnly = true;
-            document.getElementById("btn-home-near").classList.add("active");
-            resetHomeResult();
-          });
-          return;
-        }
-        State.homeNearOnly = true;
-      } else {
-        State.homeNearOnly = false;
-      }
-      document.getElementById("btn-home-near").classList.toggle("active", State.homeNearOnly);
-      resetHomeResult();
-    };
-
-    document.getElementById("btn-spin").onclick = spinRandom;
-    document.getElementById("input-search-all").oninput = renderAllPlaces;
-    document.querySelectorAll("#all-status-tabs .chip").forEach(btn => {
-      btn.onclick = () => {
-        document.querySelectorAll("#all-status-tabs .chip").forEach(c => c.classList.remove("active"));
-        btn.classList.add("active");
-        renderAllPlaces();
-      };
-    });
-
-    document.getElementById("btn-detail-back").onclick = () => navigateTo(State.prevView === "detail" ? "home" : State.prevView);
-    document.getElementById("btn-detail-fav").onclick = () => State.detailPlace && toggleFav(State.detailPlace.id);
-    document.querySelectorAll("#detail-travel-modes .dir-mode-chip").forEach(btn => {
-      btn.onclick = () => {
-        State.travelMode = btn.dataset.mode;
-        document.querySelectorAll("#detail-travel-modes .dir-mode-chip").forEach(c => c.classList.remove("active"));
-        btn.classList.add("active");
-      };
-    });
-    document.getElementById("btn-detail-nav").onclick = () => {
-      if (State.detailPlace) window.open(mapsDirUrl(State.detailPlace, State.travelMode), "_blank", "noopener");
-    };
-    document.getElementById("btn-detail-copy-link").onclick = () => {
-      if (!State.detailPlace) return;
-      copyText(mapsDirUrl(State.detailPlace, State.travelMode), "คัดลอกลิงก์ร้านเรียบร้อยแล้ว");
-    };
-    document.getElementById("btn-detail-share").onclick = async () => {
-      if (!State.detailPlace) return;
-      const url = mapsDirUrl(State.detailPlace, State.travelMode);
-      const shareText = State.detailPlace.name + " (" + (State.detailPlace.address || State.detailPlace.area || "") + ")";
-      if (navigator.share) {
-        try {
-          await navigator.share({ title: State.detailPlace.name, text: shareText, url: url });
-          return;
-        } catch (err) {}
-      }
-      copyText(shareText + " " + url, "คัดลอกข้อความสำหรับแชร์ให้เพื่อนแล้ว");
-    };
-
-    document.querySelectorAll("#fav-type-filters .chip").forEach(btn => {
-      btn.onclick = () => {
-        document.querySelectorAll("#fav-type-filters .chip").forEach(c => c.classList.remove("active"));
-        btn.classList.add("active");
-        renderFavorites();
-      };
-    });
-    document.getElementById("btn-spin-fav").onclick = () => {
-      if (!State.user) {
-        promptLoginForFeature("สุ่มจากร้านโปรด");
-        return;
-      }
-      const activeEl = document.querySelector("#fav-type-filters .chip.active");
-      const tf = activeEl ? activeEl.dataset.type : "all";
-      const pool = State.places.filter(p => State.favorites.includes(p.id) && (tf === "all" || p.type === tf));
-      const box = document.getElementById("fav-random-result");
-      if (pool.length === 0) {
-        box.innerHTML = '<p class="text-xs text-accent text-center">ไม่มีร้านโปรดให้สุ่มในหมวดนี้</p>';
-        return;
-      }
-      const p = pool[Math.floor(Math.random() * pool.length)];
-      box.innerHTML =
-        '<div class="soft-card" style="background:var(--yellow);">' +
-          '<span class="text-xs font-semibold">สุ่มได้จากร้านโปรด:</span>' +
-          '<h3 class="font-bold mt-4" style="font-size:18px;">' + esc(p.name) + '</h3>' +
-          '<button type="button" class="btn-primary btn-sm mt-8" data-open-detail="' + esc(p.id) + '">ดูรายละเอียด</button>' +
-        '</div>';
-    };
-
-    document.querySelectorAll("#nearby-radius-filters .nearby-rad-chip").forEach(btn => {
-      btn.onclick = () => {
-        document.querySelectorAll("#nearby-radius-filters .nearby-rad-chip").forEach(c => c.classList.remove("active"));
-        btn.classList.add("active");
-        renderNearby();
-      };
-    });
-
-    // Auth Tabs & Forms
-    document.getElementById("tab-auth-login").onclick = () => switchAuthTab("login");
-    document.getElementById("tab-auth-register").onclick = () => switchAuthTab("register");
-
-    document.getElementById("btn-guest-continue").onclick = () => {
-      setPersistStore(GUEST_MODE_KEY, "1");
-      navigateTo("home");
-    };
-
-    document.getElementById("form-register").onsubmit = async (e) => {
-      e.preventDefault();
-      const username = document.getElementById("reg-username").value.trim();
-      const password = document.getElementById("reg-password").value;
-      const confirmPassword = document.getElementById("reg-confirm-password").value;
-
-      if (username.length < 2 || username.length > 20) {
-        showToast("ชื่อผู้ใช้ต้องมีความยาว 2-20 ตัวอักษร");
-        return;
-      }
-      if (password.length < 6) {
-        showToast("รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร");
-        return;
-      }
-      if (password !== confirmPassword) {
-        showToast("ยืนยันรหัสผ่านไม่ตรงกับรหัสผ่าน");
-        return;
-      }
-
-      const btn = document.getElementById("btn-submit-register");
-      btn.disabled = true;
-      btn.textContent = "กำลังสมัครสมาชิก...";
-      try {
-        const res = await callApiJson("registerUserJson", username, password, confirmPassword);
-        State.token = res.token;
-        State.user = res.user;
-        State.favorites = [];
-        State.visited = [];
-        State.stats.member_count = Number(State.stats.member_count || 0) + 1;
-        if (Array.isArray(State.stats.member_names)) {
-          State.stats.member_names.push(username);
-        }
-        saveSessionToken(res.token, true);
-        syncBottomNavState();
-        document.getElementById("form-register").reset();
-        showToast("สมัครสมาชิกสำเร็จ ยินดีต้อนรับ คุณ" + res.user.nickname + "!");
-        navigateTo("home");
-      } catch (err) {
-        showToast(err.message);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "สมัครสมาชิก";
-      }
-    };
-
-    document.getElementById("form-login").onsubmit = async (e) => {
-      e.preventDefault();
-      const username = document.getElementById("login-username").value.trim();
-      const password = document.getElementById("login-password").value;
-      const remember = document.getElementById("chk-remember-me").checked;
-
-      const btn = document.getElementById("btn-submit-login");
-      btn.disabled = true;
-      btn.textContent = "กำลังเข้าสู่ระบบ...";
-      try {
-        const res = await callApiJson("loginUserJson", username, password);
-        State.token = res.token;
-        State.user = res.user;
-        State.favorites = res.favorites || [];
-        State.visited = res.visited || [];
-        saveSessionToken(res.token, remember);
-        syncBottomNavState();
-        document.getElementById("form-login").reset();
-        document.getElementById("chk-remember-me").checked = remember;
-        showToast("เข้าสู่ระบบสำเร็จ สวัสดีคุณ" + res.user.nickname);
-        navigateTo("home");
-      } catch (err) {
-        showToast(err.message);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "เข้าสู่ระบบ";
-      }
-    };
-
-    // Change Password Form
-    document.getElementById("btn-cancel-change-pw").onclick = () => navigateTo("profile");
-    document.getElementById("form-change-password").onsubmit = async (e) => {
-      e.preventDefault();
-      const curPass = document.getElementById("cpw-current").value;
-      const newPass = document.getElementById("cpw-new").value;
-      const confPass = document.getElementById("cpw-confirm").value;
-
-      if (newPass.length < 6) {
-        showToast("รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร");
-        return;
-      }
-      if (newPass !== confPass) {
-        showToast("ยืนยันรหัสผ่านใหม่ไม่ตรงกัน");
-        return;
-      }
-
-      const btn = document.getElementById("btn-submit-change-pw");
-      btn.disabled = true;
-      btn.textContent = "กำลังบันทึก...";
-      try {
-        const res = await callApiJson("changePasswordJson", State.token, curPass, newPass, confPass);
-        const keepPersist = Boolean(getPersistStore(TOKEN_KEY));
-        State.token = res.token;
-        saveSessionToken(res.token, keepPersist);
-        document.getElementById("form-change-password").reset();
-        showToast("เปลี่ยนรหัสผ่านสำเร็จ และออกจากระบบเครื่องอื่นแล้ว");
-        navigateTo("profile");
-      } catch (err) {
-        showToast(err.message);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "บันทึกรหัสผ่านใหม่";
-      }
-    };
-
-    document.getElementById("btn-copy-rec").onclick = () => copyText(document.getElementById("rec-code-box").textContent);
-    document.getElementById("chk-rec-saved").onchange = (e) => { document.getElementById("btn-finish-rec").disabled = !e.target.checked; };
-    document.getElementById("btn-finish-rec").onclick = () => navigateTo("home");
-
-    document.querySelectorAll("#admin-main-tabs .chip").forEach(btn => {
-      btn.onclick = () => {
-        document.querySelectorAll("#admin-main-tabs .chip").forEach(c => c.classList.remove("active"));
-        btn.classList.add("active");
-        const tab = btn.dataset.atab;
-        document.getElementById("admin-tab-places").classList.toggle("hidden", tab !== "places");
-        document.getElementById("admin-tab-banners").classList.toggle("hidden", tab !== "banners");
-      };
-    });
-
-    document.getElementById("btn-admin-new-place").onclick = () => openAdminPlaceForm("");
-
-    document.getElementById("form-admin-place").onsubmit = async (e) => {
-      e.preventDefault();
-      const btn = document.getElementById("btn-save-place");
-      btn.disabled = true;
-      btn.textContent = "กำลังบันทึกและอัปโหลดรูป...";
-      try {
-        const fileInput = document.getElementById("apf-files");
-        const b64List = [];
-        for (let i = 0; i < Math.min(5, fileInput.files.length); i++) {
-          b64List.push(await compressImageFile(fileInput.files[i], 1200));
-        }
-
-        const payload = {
-          id: document.getElementById("apf-id").value,
-          name: document.getElementById("apf-name").value,
-          type: document.getElementById("apf-type").value,
-          cuisine: document.getElementById("apf-cuisine").value,
-          price_level: document.getElementById("apf-price").value,
-          status: document.getElementById("apf-status").value,
-          area: document.getElementById("apf-area").value,
-          address: document.getElementById("apf-address").value,
-          lat: document.getElementById("apf-lat").value,
-          lng: document.getElementById("apf-lng").value,
-          open_time: document.getElementById("apf-open").value,
-          close_time: document.getElementById("apf-close").value,
-          closed_days: document.getElementById("apf-closed-days").value,
-          phone: document.getElementById("apf-phone").value,
-          meal_time: document.getElementById("apf-meal").value,
-          menu_tip: document.getElementById("apf-menu").value,
-          owner_note: document.getElementById("apf-note").value,
-          is_hidden: document.getElementById("apf-hidden").checked
-        };
-
-        await callApiJson("adminSavePlaceJson", State.token, payload, b64List);
-        showToast("บันทึกข้อมูลร้านเรียบร้อยแล้ว!");
-        await reloadAllBootData();
-        navigateTo("admin");
-      } catch (err) {
-        showToast(err.message);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "บันทึกข้อมูลร้าน";
-      }
-    };
-
-    document.getElementById("bnr-file").onchange = e => {
-      const f = e.target.files[0];
-      if (!f) return;
-      const reader = new FileReader();
-      reader.onload = ev => {
-        document.getElementById("bnr-preview-img").src = ev.target.result;
-        document.getElementById("bnr-preview-wrap").classList.remove("hidden");
-      };
-      reader.readAsDataURL(f);
-    };
-
-    document.getElementById("btn-cancel-banner").onclick = resetBannerForm;
-
-    document.getElementById("form-admin-banner").onsubmit = async (e) => {
-      e.preventDefault();
-      const btn = document.getElementById("btn-save-banner");
-      btn.disabled = true;
-      try {
-        const editId = document.getElementById("bnr-edit-id").value;
-        const f = document.getElementById("bnr-file").files[0];
-        let b64 = "";
-        if (f) {
-          b64 = await compressImageFile(f, 1200);
-        } else if (!editId) {
-          throw new Error("กรุณาอัปโหลดภาพโปสเตอร์");
-        }
-
-        const payload = {
-          banner_id: editId,
-          title: document.getElementById("bnr-title").value,
-          link_url: document.getElementById("bnr-link").value,
-          start_date: document.getElementById("bnr-start").value,
-          end_date: document.getElementById("bnr-end").value,
-          is_active: document.getElementById("bnr-active").checked
-        };
-
-        await callApiJson("adminSaveBannerJson", State.token, payload, b64);
-        showToast(editId ? "อัปเดตบอร์ดเรียบร้อยแล้ว" : "เพิ่มบอร์ดเรียบร้อยแล้ว");
-        resetBannerForm();
-        await reloadAllBootData();
-        renderAdminBannersList();
-      } catch (err) { showToast(err.message); }
-      finally { btn.disabled = false; }
-    };
-
-    // ==================== BOOT ====================
-    async function reloadAllBootData(isInitialBoot) {
-      const res = await callApiJson("getStep4BootJson", State.token, Boolean(isInitialBoot));
-      State.allPlacesRaw = res.places || [];
-      State.places = State.allPlacesRaw.filter(p => !p.is_hidden);
-      State.banners = res.banners || [];
-      if (res.stats) {
-        State.stats = res.stats;
-      }
-      if (res.user) {
-        State.user = res.user;
-        State.favorites = res.favorites || [];
-        State.visited = res.visited || [];
-      } else if (State.token) {
-        State.token = "";
-        clearSessionToken();
-      }
-      syncBottomNavState();
-    }
-
-    function startBoot() {
-      document.getElementById("boot-retry-wrap").classList.add("hidden");
-      const timeoutId = setTimeout(() => {
-        document.getElementById("boot-retry-wrap").classList.remove("hidden");
-      }, 6000);
-
-      reloadAllBootData(true)
-        .then(() => {
-          clearTimeout(timeoutId);
-          document.getElementById("boot-loader").classList.add("hidden");
-          navigateTo("home");
-        })
-        .catch(err => {
-          clearTimeout(timeoutId);
-          document.getElementById("boot-status").innerHTML = '<span class="text-accent font-semibold">เกิดข้อผิดพลาด: ' + esc(err.message) + '</span>';
-          document.getElementById("boot-retry-wrap").classList.remove("hidden");
-        });
-    }
-
-    startBoot();
-  </script>
-</body>
-</html>
+      document.getElementById("
